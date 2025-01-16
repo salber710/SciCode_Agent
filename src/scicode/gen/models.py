@@ -68,17 +68,32 @@ def LLM_judge(problem_prompt, samples_lst, num_samples, model="gpt-4-turbo-2024-
                          "to reach a final answer based off of these responses. When there are disagreements, use your best judgment to " \
                          f"resolve them. Answer only to the original prompt, do not include any other statements. The original prompt is: " \
                          f"{problem_prompt}. Here are the experts' responses: {samples_string}"
-    print(final_prompt)
     response = generate_openai_response(final_prompt, model=model)
     print(response)
 
     return response
 
-def unit_test_agent(problem_prompt, samples_lst):
+def unit_test_agent(problem_prompt, samples_lst, model="gpt-4-turbo-2024-04-09"):
+    background_prompt = f"Your role is to write comprehensive unit tests for code. You will receive the background for the code as well as the code itself." \
+                          "Return solely the unit tests so that they can be run from a different file in the same directory as the code."
 
-    def compiler_agent(code):
-        temp_file = ''.join(random.choices(string.ascii_uppercase + string.digits, k=15)) + ".py"
-    pass
+    for code_sample in samples_lst:
+        temp_python_file = ''.join(random.choices(string.ascii_uppercase + string.digits, k=15)) + ".py"
+        python_code = extract_python_script(code_sample)
+        temp_python_file.write_text(python_code, encoding="utf-8")
+        sample_prompt = f"{background_prompt} {code_sample}"
+        unit_tests = generate_openai_response(sample_prompt, model=model)
+
+        passed = compiler_agent(temp_python_file, unit_tests)
+
+    def compiler_agent(python_file, unit_tests, model="gpt-4-turbo-2024-04-09"):
+        """
+        Args:
+            python_file (str): the path to the python file being tested
+            unit_tests (str): the path to the unit tests
+        Returns a summary of the performance of the unit tests
+        """
+        pass
 
 def aggregate_samples(problem_prompt, samples_lst, num_samples, verifier = "LLM_judge"):
     if verifier == "LLM_judge":
