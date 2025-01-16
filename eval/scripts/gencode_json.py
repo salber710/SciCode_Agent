@@ -14,12 +14,15 @@ BACKGOUND_PROMPT_TEMPLATE = Path("eval", "data", "multistep_template.txt").read_
 
 class Gencode:
     def __init__(self, model: str, output_dir: Path,
-                 prompt_dir: Path, with_background: bool, temperature: float):
+                 prompt_dir: Path, with_background: bool, temperature: float,
+                 num_samples: int=0, verifier: str=""):
         self.model = model
         self.output_dir = output_dir
         self.prompt_dir = prompt_dir
         self.with_background = with_background
         self.temperature = temperature
+        self.num_samples = num_samples
+        self.verifier = verifier
         self.previous_llm_code = []
 
     def _get_background_dir(self):
@@ -94,6 +97,9 @@ class Gencode:
         if "claude" in model:
             model_kwargs["max_tokens"] = 4096
         model_kwargs["temperature"] = self.temperature
+        if "sampling" in model:
+            model_kwargs["num_samples"] = self.num_samples
+            model_kwargs["verifier"] = self.verifier
         # write the response to a file if it doesn't exist
         model_fct = get_model_function(model, **model_kwargs)
         response_from_llm = model_fct(prompt)
@@ -179,6 +185,18 @@ def get_cli() -> argparse.ArgumentParser:
         default=0,
         help="Generation temperature",
     )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=1,
+        help='Number of times to sample LLM'
+    )
+    parser.add_argument(
+        "--verifier",
+        type=str,
+        default="LLM_judge",
+        help='Type of method to use to verify/grade generated samples'
+    )
     return parser
 
 
@@ -187,11 +205,14 @@ def main(model: str,
          input_path: Path,
          prompt_dir: Path,
          with_background: bool,
-         temperature: float
+         temperature: float,
+         num_samples: int,
+         verifier: str
 ) -> None:
     gcode = Gencode(
         model=model, output_dir=output_dir,
-        prompt_dir=prompt_dir,  with_background=with_background, temperature=temperature
+        prompt_dir=prompt_dir,  with_background=with_background, temperature=temperature,
+        num_samples=num_samples, verifier=verifier
     )
     prompt_template = BACKGOUND_PROMPT_TEMPLATE if with_background else DEFAULT_PROMPT_TEMPLATE
     data = read_from_jsonl(input_path)

@@ -2,6 +2,8 @@ from functools import partial
 from openai import OpenAI
 import anthropic
 import google.generativeai as genai
+import random
+import string
 import config
 import re
 import os
@@ -56,6 +58,56 @@ def generate_openai_response(prompt: str, *, model="gpt-4-turbo-2024-04-09",
         ],
     )
     return completion.choices[0].message.content
+
+def LLM_judge(problem_prompt, samples_lst, num_samples, model="gpt-4-turbo-2024-04-09"):
+    # Aggregate samples so that they follow the form "(i): sample i response"
+    samples_string = " ".join([f"({i+1}): {x}" for i, x in enumerate(samples_lst)])
+
+    final_prompt = f"Your role is a supervisor. You receive {num_samples} different responses, each from an expert. Each response is separated in the form " \
+                         "(i): where i is the ID of the expert and the contents proceeding that is the response for that ID. Your job is " \
+                         "to reach a final answer based off of these responses. When there are disagreements, use your best judgment to " \
+                         f"resolve them. Answer only to the original prompt, do not include any other statements. The original prompt is: " \
+                         f"{problem_prompt}. Here are the experts' responses: {samples_string}"
+    print(final_prompt)
+    response = generate_openai_response(final_prompt, model=model)
+    print(response)
+
+    return response
+
+def unit_test_agent(problem_prompt, samples_lst):
+
+    def compiler_agent(code):
+        temp_file = ''.join(random.choices(string.ascii_uppercase + string.digits, k=15)) + ".py"
+    pass
+
+def aggregate_samples(problem_prompt, samples_lst, num_samples, verifier = "LLM_judge"):
+    if verifier == "LLM_judge":
+        return LLM_judge(problem_prompt, samples_lst, num_samples)
+    elif verifier == "unit_test_agent":
+        return unit_test_agent(problem_prompt, samples_lst)
+    else:
+        print("Not a recognized verifier")
+        exit
+
+
+def generate_openai_sampled_response(prompt: str, *, model,
+                             temperature: float = 0.7, num_samples: int = 3, verifier: str = "LLM_judge") -> str:
+    """call the openai api to generate a response"""
+    key: str = get_config()["OPENAI_KEY"]  # type: ignore
+    client = OpenAI(api_key=key)
+    completion = client.chat.completions.create(
+        model=model,
+        temperature=temperature,
+        n=num_samples,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    all_responses_lst = [choice.message.content for choice in completion.choices]
+    final_response = aggregate_samples(prompt, all_responses_lst, num_samples, verifier=verifier)
+
+    return final_response
 
 
 def generate_anthropic_response(prompt, *, model="claude-3-opus-20240229",
@@ -116,7 +168,10 @@ def generate_google_response(prompt: str, *, model: str = "gemini-pro",
 
 def get_model_function(model: str, **kwargs):
     """Return the appropriate function to generate a response based on the model"""
-    if model.startswith("litellm/"):
+    if "sampling" in model:
+        fct = generate_openai_sampled_response
+        model=model.replace("_sampling", "")
+    elif model.startswith("litellm/"):
         model = model.removeprefix("litellm/")
         fct = generate_litellm_response
     elif "gpt" in model:
