@@ -64,7 +64,7 @@ from scicode.parse.parse import process_hdf5_to_tuple
     def run_script(script_path):
         try:
             subprocess.run(['python', script_path], check=True, capture_output=True,
-                           text=True, timeout=1800)
+                           text=True, timeout=180)
             return 0
         except subprocess.CalledProcessError as e:
             print(f"Error running script {script_path}: {e}")
@@ -82,11 +82,13 @@ from scicode.parse.parse import process_hdf5_to_tuple
     for i in range(PROB_NUM):
         correct_dict[f'{i+1}'] = []
 
+    num_steps_run = 0
     for file_path in tmp_dir.iterdir():
         if file_path.is_file():
             func_id = file_path.stem
             prob_id = func_id.split('.')[0]
             print(f'Testing function {func_id} ...')
+            num_steps_run += 1
             tot_prob[int(prob_id) - 1] += 1
             logs_dir_ = Path(log_dir, model_name, _get_background_dir(with_background))
             logs_dir_.mkdir(parents=True, exist_ok=True)
@@ -100,6 +102,7 @@ from scicode.parse.parse import process_hdf5_to_tuple
                         correct_dict[prob_id].append(func_id)
                 continue
             ret = run_script(file_path)
+            #num_steps_run += 1
             if ret == 0:
                 correct_prob[int(prob_id) - 1] += 1
                 correct_step.append(func_id)
@@ -119,6 +122,7 @@ from scicode.parse.parse import process_hdf5_to_tuple
                            correct_prob[i] == tot_prob[i]
                            and tot_prob[i] != 0)
 
+    print('number of steps actually run', num_steps_run)
     print(f'correct problems: {correct_prob_num}/{DEV_PROB_NUM if dev_set else PROB_NUM - DEV_PROB_NUM}')
     print(f'correct steps: {len(correct_step)}/{DEV_STEP_NUM if dev_set else STEP_NUM}')
 

@@ -59,32 +59,44 @@ def generate_openai_response(prompt: str, *, model="gpt-4-turbo-2024-04-09",
     )
     return completion.choices[0].message.content
 
-def LLM_judge(problem_prompt, samples_lst, num_samples, model="gpt-4-turbo-2024-04-09"):
+def LLM_judge(problem_prompt, code_prompt, samples_lst, num_samples, model="gpt-4-turbo-2024-04-09"):
     # Aggregate samples so that they follow the form "(i): sample i response"
-    samples_string = " ".join([f"({i+1}): {x}" for i, x in enumerate(samples_lst)])
+    samples_string = " ".join([f"(EXPERT {i+1} RESPONSE): {x}" for i, x in enumerate(samples_lst)])
 
     final_prompt = f"Your role is a supervisor. You receive {num_samples} different responses, each from an expert. Each response is separated in the form " \
-                         "(i): where i is the ID of the expert and the contents proceeding that is the response for that ID. Your job is " \
+                         "(EXPERT i RESPONSE): where i is the ID of the expert and the contents proceeding that is the response for that ID. Your job is " \
                          "to reach a final answer based off of these responses. When there are disagreements, use your best judgment to " \
-                         f"resolve them. Answer only to the original prompt, do not include any other statements. The original prompt is: " \
-                         f"{problem_prompt}. Here are the experts' responses: {samples_string}"
+                         f"resolve them. Answer only to the original prompt, do not include any other statements. Here is the original prompt: " \
+                         f"{code_prompt}. Here are the experts' responses: {samples_string}"
+    print("#######################################################################################")
+    print("PROMPT:")
+    print(final_prompt)
     response = generate_openai_response(final_prompt, model=model)
+    print("#######################################################################################")
+    print("RESPONSE:")
     print(response)
 
     return response
 
 def unit_test_agent(problem_prompt, samples_lst, model="gpt-4-turbo-2024-04-09"):
-    background_prompt = f"Your role is to write comprehensive unit tests for code. You will receive the background for the code as well as the code itself." \
+    background_prompt = f"Your role is to write comprehensive unit tests for code. You will receive the background for the code as well as the code's skeleton." \
                           "Return solely the unit tests so that they can be run from a different file in the same directory as the code."
+    temp_python_file = ''.join(random.choices(string.ascii_uppercase + string.digits, k=15)) + ".py"
+    unit_test_prompt = background_prompt + problem_prompt
+    unit_tests = generate_openai_response(unit_test_prompt, model=model)
+    #print(unit_test_prompt)
+    #print("##################################################################")
+    #print(unit_tests)
 
+    '''
     for code_sample in samples_lst:
         temp_python_file = ''.join(random.choices(string.ascii_uppercase + string.digits, k=15)) + ".py"
         python_code = extract_python_script(code_sample)
         temp_python_file.write_text(python_code, encoding="utf-8")
         sample_prompt = f"{background_prompt} {code_sample}"
         unit_tests = generate_openai_response(sample_prompt, model=model)
-
         passed = compiler_agent(temp_python_file, unit_tests)
+    ''' 
 
     def compiler_agent(python_file, unit_tests, model="gpt-4-turbo-2024-04-09"):
         """
@@ -95,9 +107,9 @@ def unit_test_agent(problem_prompt, samples_lst, model="gpt-4-turbo-2024-04-09")
         """
         pass
 
-def aggregate_samples(problem_prompt, samples_lst, num_samples, verifier = "LLM_judge"):
+def aggregate_samples(problem_prompt, code_prompt, samples_lst, num_samples, verifier = "LLM_judge"):
     if verifier == "LLM_judge":
-        return LLM_judge(problem_prompt, samples_lst, num_samples)
+        return LLM_judge(problem_prompt, code_prompt, samples_lst, num_samples)
     elif verifier == "unit_test_agent":
         return unit_test_agent(problem_prompt, samples_lst)
     else:
@@ -105,14 +117,15 @@ def aggregate_samples(problem_prompt, samples_lst, num_samples, verifier = "LLM_
         exit
 
 
-def generate_openai_sampled_response(prompt: str, *, model,
+def generate_openai_sampled_response(prompt: str, *, model, code_prompt: str = "",
                              temperature: float = 0.7, num_samples: int = 3, verifier: str = "LLM_judge") -> str:
     """call the openai api to generate a response"""
+    sampling_temperature = 0.7 #### MAKE THIS AN ARG LATER
     key: str = get_config()["OPENAI_KEY"]  # type: ignore
     client = OpenAI(api_key=key)
     completion = client.chat.completions.create(
         model=model,
-        temperature=temperature,
+        temperature=sampling_temperature,
         n=num_samples,
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
@@ -120,7 +133,7 @@ def generate_openai_sampled_response(prompt: str, *, model,
         ],
     )
     all_responses_lst = [choice.message.content for choice in completion.choices]
-    final_response = aggregate_samples(prompt, all_responses_lst, num_samples, verifier=verifier)
+    final_response = aggregate_samples(prompt, code_prompt, all_responses_lst, num_samples, verifier=verifier)
 
     return final_response
 

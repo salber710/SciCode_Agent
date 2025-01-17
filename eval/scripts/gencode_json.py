@@ -89,7 +89,7 @@ class Gencode:
 
         if output_file_path.exists():
             return
-        prompt, previous_code = self.generate_prompt_with_steps(prob_data, num_steps, prompt_template)
+        prompt, previous_code, next_step_str = self.generate_prompt_with_steps(prob_data, num_steps, prompt_template)
         if save:
             self.save_prompt_with_steps(prob_data, prompt, num_steps)
 
@@ -97,6 +97,7 @@ class Gencode:
         if "claude" in model:
             model_kwargs["max_tokens"] = 4096
         model_kwargs["temperature"] = self.temperature
+        model_kwargs["code_prompt"] = next_step_str
         if "sampling" in model:
             model_kwargs["num_samples"] = self.num_samples
             model_kwargs["verifier"] = self.verifier
@@ -146,7 +147,7 @@ class Gencode:
             problem_steps_str=problem_steps_str,
             next_step_str=next_step_str,
             dependencies=dependencies,
-        ), f'{dependencies}\n{previous_code_str}\n'
+        ), f'{dependencies}\n{previous_code_str}\n', next_step_str
 
 
 def get_cli() -> argparse.ArgumentParser:
