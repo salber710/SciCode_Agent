@@ -35,20 +35,20 @@ class Gencode:
         output_file_path.write_text(prompt, encoding="utf-8")
 
     def save_response_with_steps(self, prob_data: dict, response: str,
-                                 previous_code: str, num_steps: int) -> None:
+                                 previous_code: str, num_steps: int, suffix: str = "") -> None:
         output_dir = (
                 self.output_dir / Path(self.model).parts[-1] / self._get_background_dir()
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         prob_id = prob_data["problem_id"]
-        output_file_path = output_dir / f"{prob_id}.{num_steps}.py"
+        output_file_path = output_dir / f"{prob_id}.{num_steps}{suffix}.py"
         python_code = extract_python_script(response)
         output_file_path.write_text(f'{previous_code}\n{python_code}', encoding="utf-8")
 
     def generate_response_with_steps(
         self, prob_data: dict, num_steps: int, tot_steps: int, model="gpt-4o",
             prompt_template=DEFAULT_PROMPT_TEMPLATE,
-            *, save: bool = True) -> None:
+            *, save: bool = True, num_repeats: int = 1) -> None:
         """
 
         Args:
@@ -58,6 +58,7 @@ class Gencode:
             model (str)
             prompt_template (str)
             save (bool, optional): Save propmt and model response. Defaults to True.
+            num_repeat (int): Number of replicates for each subtask to save
         """
         prob_id = prob_data["problem_id"]
         output_file_path = (
@@ -97,16 +98,22 @@ class Gencode:
         if "claude" in model:
             model_kwargs["max_tokens"] = 4096
         model_kwargs["temperature"] = self.temperature
-        model_kwargs["code_prompt"] = next_step_str
         if "sampling" in model:
+            model_kwargs["code_prompt"] = next_step_str
             model_kwargs["num_samples"] = self.num_samples
             model_kwargs["verifier"] = self.verifier
+        
         # write the response to a file if it doesn't exist
         model_fct = get_model_function(model, **model_kwargs)
-        response_from_llm = model_fct(prompt)
-        self.previous_llm_code[num_steps - 1] = extract_python_script(response_from_llm)
-        self.save_response_with_steps(prob_data, response_from_llm, previous_code, num_steps)
-
+        for index in range(num_repeats):
+            response_from_llm = model_fct(prompt)
+            if index == 0:
+                self.previous_llm_code[num_steps - 1] = extract_python_script(response_from_llm)
+            
+            suffix = f"_{index}"
+            if num_repeats == 1:
+                suffix = ""
+            self.save_response_with_steps(prob_data, response_from_llm, previous_code, num_steps, suffix = suffix)
     @staticmethod
     def process_problem_code(prob_data: dict, num_steps: int) -> str:
         header_docstring = prob_data['sub_steps'][num_steps - 1]['function_header']
@@ -190,13 +197,19 @@ def get_cli() -> argparse.ArgumentParser:
         "--num-samples",
         type=int,
         default=1,
-        help='Number of times to sample LLM'
+        help='Number of times to sample LLM for the repeated sampling methods'
     )
     parser.add_argument(
         "--verifier",
         type=str,
         default="LLM_judge",
         help='Type of method to use to verify/grade generated samples'
+    )
+    parser.add_argument(
+        "--num-repeats",
+        type=int,
+        default=1,
+        help='Number of replicates for each subtask'
     )
     return parser
 
@@ -208,7 +221,8 @@ def main(model: str,
          with_background: bool,
          temperature: float,
          num_samples: int,
-         verifier: str
+         verifier: str,
+         num_repeats: int
 ) -> None:
     gcode = Gencode(
         model=model, output_dir=output_dir,
@@ -225,7 +239,7 @@ def main(model: str,
             if (prob_id == "13" and i == 5) or (prob_id == "62" and i == 0)\
                     or (prob_id == "76" and i == 2):
                 continue
-            gcode.generate_response_with_steps(problem, i + 1, steps, model, prompt_template)
+            gcode.generate_response_with_steps(problem, i + 1, steps, model, prompt_template, num_repeats=num_repeats)
 
 
 if __name__ == "__main__":

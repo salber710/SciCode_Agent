@@ -102,7 +102,6 @@ from scicode.parse.parse import process_hdf5_to_tuple
                         correct_dict[prob_id].append(func_id)
                 continue
             ret = run_script(file_path)
-            #num_steps_run += 1
             if ret == 0:
                 correct_prob[int(prob_id) - 1] += 1
                 correct_step.append(func_id)

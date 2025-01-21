@@ -1,5 +1,6 @@
 from functools import partial
 from openai import OpenAI
+from pathlib import Path
 import anthropic
 import google.generativeai as genai
 import random
@@ -8,6 +9,8 @@ import config
 import re
 import os
 import litellm
+import subprocess
+import sys
 from litellm.utils import validate_environment as litellm_validate_environment
 
 from scicode import keys_cfg_path
@@ -68,50 +71,123 @@ def LLM_judge(problem_prompt, code_prompt, samples_lst, num_samples, model="gpt-
                          "to reach a final answer based off of these responses. When there are disagreements, use your best judgment to " \
                          f"resolve them. Answer only to the original prompt, do not include any other statements. Here is the original prompt: " \
                          f"{code_prompt}. Here are the experts' responses: {samples_string}"
-    print("#######################################################################################")
-    print("PROMPT:")
-    print(final_prompt)
+    #print("#######################################################################################")
+    #print("PROMPT:")
+    #print(final_prompt)
     response = generate_openai_response(final_prompt, model=model)
-    print("#######################################################################################")
-    print("RESPONSE:")
-    print(response)
+    #print("#######################################################################################")
+    #print("RESPONSE:")
+    #print(response)
 
     return response
 
-def unit_test_agent(problem_prompt, samples_lst, model="gpt-4-turbo-2024-04-09"):
-    background_prompt = f"Your role is to write comprehensive unit tests for code. You will receive the background for the code as well as the code's skeleton." \
-                          "Return solely the unit tests so that they can be run from a different file in the same directory as the code."
-    temp_python_file = ''.join(random.choices(string.ascii_uppercase + string.digits, k=15)) + ".py"
-    unit_test_prompt = background_prompt + problem_prompt
-    unit_tests = generate_openai_response(unit_test_prompt, model=model)
-    #print(unit_test_prompt)
-    #print("##################################################################")
-    #print(unit_tests)
+def unit_test_agent(problem_prompt, code_prompt, samples_lst, model="gpt-4-turbo-2024-04-09"):
+    """
+    Args:
+        problem_prompt (str): original prompt for the problem
+        code_prompt (str): part of the original prompt describing what the code should do and outlining its skeleton
+        samples_lst (lst): a list containing the sampled generated functions
+        model (str): which LLM to use for writing the unit tests
+    """
+    code_file_name = "testingCode.py"
+    background_prompt = f"Your role is to write comprehensive unit tests for a function. You will receive the background for a python function as well as a potential implementation " \
+                        "of the function. The implementation may be incorrect. Suggest unit tests that are comprehensive enough to find all of the potential pitfalls you think may happen." \
+                        f"Return only the unit tests. Your response should only contain python code and in a form so that the unit tests can be run assuming there's a separate python file called {code_file_name} containing the function. Here is the original prompt used to generate the function: {code_prompt}" \
+                        "Here is the returned implementation that you should write unit tests for: "
+    summarize_unit_tests_prompt = "Your role is to summarize a set of unit tests. You will receive a set of unit test python files in the form (UNIT TESTS i): where i is the i-th set of unit tests. " \
+                                  "Do not modify the unit tests, only remove redundant unit tests that are similar to one another and merge the rest into one python file. Only return the code, do not include " \
+                                  "anything else in your response."
+    
+    max_prop_passed = 0
+    best_code = samples_lst[0]
+    unit_test_lst = []
+    # Collect unit tests
+    for sample_code in samples_lst:
+        unit_test_prompt = background_prompt + sample_code
+        unit_tests = generate_openai_response(unit_test_prompt, model=model)
+        unit_test_lst.append(unit_tests)
 
-    '''
-    for code_sample in samples_lst:
-        temp_python_file = ''.join(random.choices(string.ascii_uppercase + string.digits, k=15)) + ".py"
-        python_code = extract_python_script(code_sample)
-        temp_python_file.write_text(python_code, encoding="utf-8")
-        sample_prompt = f"{background_prompt} {code_sample}"
-        unit_tests = generate_openai_response(sample_prompt, model=model)
-        passed = compiler_agent(temp_python_file, unit_tests)
-    ''' 
+    # Summarize unit tests
+    summarize_unit_tests_prompt += " ".join([f"(UNIT TESTS {i+1}): {x}" for i, x in enumerate(unit_test_lst)])
+    all_unit_tests = generate_openai_response(summarize_unit_tests_prompt)
+    python_script = all_unit_tests.split("```python")[1].split("```")[0] if '```python' in all_unit_tests else all_unit_tests.split('```')[1].split('```')[0]
 
-    def compiler_agent(python_file, unit_tests, model="gpt-4-turbo-2024-04-09"):
-        """
-        Args:
-            python_file (str): the path to the python file being tested
-            unit_tests (str): the path to the unit tests
-        Returns a summary of the performance of the unit tests
-        """
-        pass
+    # Create temporary directory + files to run unit tests
+    unitTest_file_name = ''.join(random.choices(string.ascii_uppercase + string.digits, k=15)) + ".py"
+    output_dir = Path(os.getcwd()) / Path("temp_unit_tests")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    temp_unit_test_file = output_dir / unitTest_file_name
+    temp_python_file = output_dir / code_file_name
+    temp_unit_test_file.write_text(python_script, encoding="utf-8")
+
+    # Test every sample code, keep the sample with the most unit tests passed
+    for i, sample_code in enumerate(samples_lst):
+        sample_python_code = sample_code.split("```python")[1].split("```")[0] if '```python' in sample_code else sample_code.split('```')[1].split('```')[0]
+        temp_python_file.write_text(sample_python_code, encoding="utf-8")
+        prop_tests_passed = compiler_agent(temp_unit_test_file,model)
+        print(f"Sample Code {i} passed {round(prop_tests_passed, 4) * 100}% of the unit tests")
+        if prop_tests_passed > max_prop_passed:
+            best_code = sample_code
+            max_prop_passed = prop_tests_passed
+        Path.unlink(temp_python_file)
+    Path.unlink(temp_unit_test_file)
+
+    return best_code
+
+def compiler_agent(python_file, model="gpt-4-turbo-2024-04-09"):
+    """
+    Args:
+        python_file (str): the path to the python file being tested
+        unit_tests (str): the path to the unit tests
+    Returns:
+        float: proportion of unit tests passed (0.0 to 1.0)
+    """
+    results = {
+        'compilation_success': False,
+        'proportion_passed': 0.0,
+        'error_message': None
+    }
+    
+    try:
+        # Try to compile the Python file to check for syntax errors
+        with open(python_file, 'r', encoding='utf-8') as file:
+            compile(file.read(), python_file, 'exec')
+        results['compilation_success'] = True
+        
+        # Run the unit tests using subprocess with pytest's detailed output
+        process = subprocess.run(
+            [sys.executable, '-m', 'pytest', str(python_file), '-v'],
+            capture_output=True,
+            text=True
+        )
+        
+        # Parse the test results to count passed and total tests
+        output_lines = process.stdout.split('\n')
+        #print(output_lines)
+        total_tests = 0
+        passed_tests = 0
+        
+        for line in output_lines:
+            if '::test_' in line and '%]' in line:  # Only count lines that contain actual test results
+                #print(line)
+                total_tests += 1
+                if 'PASSED' in line:
+                    passed_tests += 1
+        
+        # Calculate proportion if there were any tests
+        if total_tests > 0:
+            results['proportion_passed'] = passed_tests / total_tests
+            
+    except Exception as e:
+        results['error_message'] = str(e)
+        
+    return results['proportion_passed']
 
 def aggregate_samples(problem_prompt, code_prompt, samples_lst, num_samples, verifier = "LLM_judge"):
     if verifier == "LLM_judge":
         return LLM_judge(problem_prompt, code_prompt, samples_lst, num_samples)
     elif verifier == "unit_test_agent":
-        return unit_test_agent(problem_prompt, samples_lst)
+        return unit_test_agent(problem_prompt, code_prompt, samples_lst)
     else:
         print("Not a recognized verifier")
         exit
@@ -198,7 +274,8 @@ def get_model_function(model: str, **kwargs):
     """Return the appropriate function to generate a response based on the model"""
     if "sampling" in model:
         fct = generate_openai_sampled_response
-        model=model.replace("_sampling", "")
+        model=model.split("_")[0]
+        #print(f"Using model: {model}...")
     elif model.startswith("litellm/"):
         model = model.removeprefix("litellm/")
         fct = generate_litellm_response
