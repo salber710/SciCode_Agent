@@ -1,0 +1,98 @@
+from scicode.parse.parse import process_hdf5_to_tuple
+import numpy as np
+
+import numpy as np
+
+
+def find_equilibrium(spins, N, T, J, num_steps):
+    '''Find the thermal equilibrium state of a given spin system
+    Input:
+    spins: starting spin state, 1D array of 1 and -1
+    N: size of spin system, int
+    T: temperature, float
+    J: interaction matrix, 2D array of floats
+    num_steps: number of sampling steps per spin in the Monte Carlo simulation, int
+    Output:
+    spins: final spin state after Monte Carlo simulation, 1D array of 1 and -1
+    '''
+
+    def calculate_energy(spins):
+        '''Calculate the energy of the current spin configuration.'''
+        return -0.5 * np.dot(np.dot(spins, J), spins)
+
+    current_energy = calculate_energy(spins)
+
+    for step in range(num_steps):
+        # Randomly select a pair of spins
+        i, j = np.random.choice(N, size=2, replace=False)
+        
+        # Flip both spins
+        spins[i] *= -1
+        spins[j] *= -1
+        
+        # Calculate the new energy
+        new_energy = calculate_energy(spins)
+        
+        # Calculate the change in energy
+        delta_E = new_energy - current_energy
+        
+        # Metropolis criterion: accept the change with certain probability
+        if delta_E > 0 and np.random.rand() >= np.exp(-delta_E / T):
+            # Revert the spin flip if not accepted
+            spins[i] *= -1
+            spins[j] *= -1
+        else:
+            # Update current energy if flip is accepted
+            current_energy = new_energy
+
+    return spins
+
+
+
+def calculate_overlap(replicas):
+    '''Calculate all overlaps in an ensemble of replicas
+    Input:
+    replicas: list of replicas, list of 1D arrays of 1 and -1
+    Output:
+    overlaps: pairwise overlap values between all replicas, 1D array of floats, sorted
+    '''
+    overlaps = []
+
+    # Use a nested function to calculate dot product and normalization
+    def compute_overlap(replica_a, replica_b):
+        return sum(a * b for a, b in zip(replica_a, replica_b)) / len(replica_a)
+
+    # Use enumerate for index and value access
+    for i, replica_i in enumerate(replicas):
+        for j, replica_j in enumerate(replicas):
+            if i < j:  # Ensure unique pairs
+                overlaps.append(compute_overlap(replica_i, replica_j))
+
+    # Sort overlaps using a key function for clarity
+    overlaps.sort(key=lambda x: x)
+
+    return overlaps
+
+
+try:
+    targets = process_hdf5_to_tuple('50.2', 3)
+    target = targets[0]
+    replicas = [np.ones(5) for _ in range(5)]
+    overlaps = calculate_overlap(replicas)
+    assert np.allclose(overlaps, target)
+
+    target = targets[1]
+    np.random.seed(1)
+    replicas = [np.random.choice([-1, 1], size=10) for _ in range(10)]
+    overlaps = calculate_overlap(replicas)
+    assert np.allclose(overlaps, target)
+
+    target = targets[2]
+    np.random.seed(3)
+    replicas = [np.random.choice([-1, 1], size=360) for _ in range(10)]
+    overlaps = calculate_overlap(replicas)
+    assert np.allclose(overlaps, target)
+
+except Exception as e:
+    print(f'Error during execution: {str(e)}')
+    raise e

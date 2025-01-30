@@ -1,5 +1,9 @@
 import argparse
 from pathlib import Path
+from typing import Dict, Any, List
+import multiprocessing
+from multiprocessing import Pool
+from tqdm import tqdm
 
 from scicode.parse.parse import (
     extract_function_name,
@@ -48,7 +52,7 @@ class Gencode:
     def generate_response_with_steps(
         self, prob_data: dict, num_steps: int, tot_steps: int, model="gpt-4o",
             prompt_template=DEFAULT_PROMPT_TEMPLATE,
-            *, save: bool = True, num_repeats: int = 1) -> None:
+            *, save: bool = True, num_repeats: int = 1, save_feedback_steps: bool = False) -> None:
         """
 
         Args:
@@ -95,25 +99,33 @@ class Gencode:
             self.save_prompt_with_steps(prob_data, prompt, num_steps)
 
         model_kwargs = {}
+        model_kwargs["temperature"] = self.temperature
         if "claude" in model:
             model_kwargs["max_tokens"] = 4096
-        model_kwargs["temperature"] = self.temperature
-        if "sampling" in model:
+        elif "feedback" in model or "Feedback" in model:
+            model_kwargs["code_prompt"] = next_step_str
+        elif "sampling" in model:
             model_kwargs["code_prompt"] = next_step_str
             model_kwargs["num_samples"] = self.num_samples
             model_kwargs["verifier"] = self.verifier
-        
         # write the response to a file if it doesn't exist
         model_fct = get_model_function(model, **model_kwargs)
         for index in range(num_repeats):
             response_from_llm = model_fct(prompt)
-            if index == 0:
-                self.previous_llm_code[num_steps - 1] = extract_python_script(response_from_llm)
-            
-            suffix = f"_{index}"
-            if num_repeats == 1:
-                suffix = ""
-            self.save_response_with_steps(prob_data, response_from_llm, previous_code, num_steps, suffix = suffix)
+            if save_feedback_steps:
+                final_response, all_responses = response_from_llm
+                if index == 0:
+                    self.previous_llm_code[num_steps - 1] = extract_python_script(final_response)
+                for j, response in enumerate(all_responses):
+                    suffix = f"_{j}"
+                    self.save_response_with_steps(prob_data, response, previous_code, num_steps, suffix = suffix)
+            else:
+                if index == 0:
+                    self.previous_llm_code[num_steps - 1] = extract_python_script(response_from_llm)
+                suffix = f"_{index}"
+                if num_repeats == 1:
+                    suffix = ""
+                self.save_response_with_steps(prob_data, response_from_llm, previous_code, num_steps, suffix = suffix)
     @staticmethod
     def process_problem_code(prob_data: dict, num_steps: int) -> str:
         header_docstring = prob_data['sub_steps'][num_steps - 1]['function_header']
@@ -211,36 +223,114 @@ def get_cli() -> argparse.ArgumentParser:
         default=1,
         help='Number of replicates for each subtask'
     )
+    parser.add_argument(
+        "--save-feedback-steps",
+        action="store_true",
+        help="Save iteration steps (only relevant for feedback-based models)",
+    )
     return parser
 
 
-def main(model: str,
-         output_dir: Path,
-         input_path: Path,
-         prompt_dir: Path,
-         with_background: bool,
-         temperature: float,
-         num_samples: int,
-         verifier: str,
-         num_repeats: int
-) -> None:
+def process_problem(args: tuple) -> None:
+    """
+    Process a single problem with all its steps.
+    
+    Args:
+        args: Tuple containing (
+            problem: Dict containing problem data
+            gcode_params: Dict containing parameters for Gencode initialization
+            prompt_template: str for prompt template
+            num_repeats: int for number of repeats
+            save_feedback_steps: bool for saving feedback steps
+        )
+    """
+    problem, gcode_params, prompt_template, num_repeats, save_feedback_steps = args
+    print(f"Processing problem {problem['problem_id']}...")
+    
+    # Initialize Gencode instance for this process
     gcode = Gencode(
-        model=model, output_dir=output_dir,
-        prompt_dir=prompt_dir,  with_background=with_background, temperature=temperature,
-        num_samples=num_samples, verifier=verifier
+        model=gcode_params['model'],
+        output_dir=gcode_params['output_dir'],
+        prompt_dir=gcode_params['prompt_dir'],
+        with_background=gcode_params['with_background'],
+        temperature=gcode_params['temperature'],
+        num_samples=gcode_params['num_samples'],
+        verifier=gcode_params['verifier']
     )
-    prompt_template = BACKGOUND_PROMPT_TEMPLATE if with_background else DEFAULT_PROMPT_TEMPLATE
-    data = read_from_jsonl(input_path)
-    for problem in data:
-        prob_id = problem['problem_id']
-        steps = len(problem['sub_steps'])
-        print(f'Generating {prob_id}...')
-        for i in range(steps):
-            if (prob_id == "13" and i == 5) or (prob_id == "62" and i == 0)\
-                    or (prob_id == "76" and i == 2):
-                continue
-            gcode.generate_response_with_steps(problem, i + 1, steps, model, prompt_template, num_repeats=num_repeats)
+    
+    prob_id = problem['problem_id']
+    steps = len(problem['sub_steps'])
+    
+    # Skip specific problem-step combinations
+    skip_combinations = {
+        ('13', 5),
+        ('62', 0),
+        ('76', 2)
+    }
+    
+    for i in range(steps):
+        if (prob_id, i) not in skip_combinations:
+            try:
+                gcode.generate_response_with_steps(
+                    problem,
+                    i + 1,
+                    steps,
+                    gcode_params['model'],
+                    prompt_template,
+                    num_repeats=num_repeats,
+                    save_feedback_steps=save_feedback_steps
+                )
+            except Exception as e:
+                print(f"Error processing problem {prob_id} step {i+1}: {str(e)}")
 
+def main(
+    model: str,
+    output_dir: Path,
+    input_path: Path,
+    prompt_dir: Path,
+    with_background: bool,
+    temperature: float,
+    num_samples: int,
+    verifier: str,
+    num_repeats: int,
+    save_feedback_steps: bool,
+    num_processes: int = None
+) -> None:
+    """
+    Main function to process problems in parallel.
+    """
+    num_processes = multiprocessing.cpu_count()
+    
+    # Initialize shared parameters
+    prompt_template = BACKGOUND_PROMPT_TEMPLATE if with_background else DEFAULT_PROMPT_TEMPLATE
+    
+    # Package Gencode parameters
+    gcode_params = {
+        'model': model,
+        'output_dir': output_dir,
+        'prompt_dir': prompt_dir,
+        'with_background': with_background,
+        'temperature': temperature,
+        'num_samples': num_samples,
+        'verifier': verifier
+    }
+    
+    # Read data
+    data = read_from_jsonl(input_path)
+    
+    # Prepare arguments for parallel processing
+    process_args = [
+        (problem, gcode_params, prompt_template, num_repeats, save_feedback_steps)
+        for problem in data
+    ]
+    
+    # Process problems in parallel with progress bar
+    with Pool(processes=num_processes) as pool:
+        list(tqdm(
+            pool.imap(process_problem, process_args),
+            total=len(process_args),
+            desc="Processing problems"
+        ))
 
 if __name__ == "__main__":
     args = get_cli().parse_args()

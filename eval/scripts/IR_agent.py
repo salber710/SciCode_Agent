@@ -8,7 +8,11 @@ from duckduckgo_search import DDGS
 import logging
 from bs4 import BeautifulSoup
 import tiktoken
+import re
+
 from scicode import keys_cfg_path
+import config
+
 
 @dataclass
 class ResearchResult:
@@ -16,8 +20,7 @@ class ResearchResult:
     query: str
     search_queries: List[str]
     relevant_sources: List[Dict[str, str]]
-    domain_summary: str
-    implementation_guidance: str
+    summary: str
 
 class ScientificResearchAssistant:
     """
@@ -51,12 +54,20 @@ class ScientificResearchAssistant:
         """
         prompt = f"""
         Given this scientific programming question: "{question}"
-        Generate 3-5 specific search queries to gather relevant background information.
-        Focus on academic sources, documentation, and technical references.
+        Generate 2-3 search queries to gather relevant background information.
+        
+        Guidelines for queries:
+        - Use plain text without quotes or special characters
+        - Keep each query under 10 words
+        - Focus on simple tutorials and the fundamentals
+        - Include both theoretical and practical aspects
+        - Make queries specific but not too complex
+        - Coding queries should be specific to Python
+        
         Return only the queries, one per line.
         """
         
-        async with openai.AsyncOpenAI() as client:
+        async with openai.AsyncOpenAI(api_key = self.openai_api_key) as client:
             response = await client.chat.completions.create(
                 model="gpt-4",
                 messages=[
@@ -69,7 +80,28 @@ class ScientificResearchAssistant:
         queries = response.choices[0].message.content.strip().split('\n')
         return [q.strip() for q in queries if q.strip()]
 
-    async def search_web(self, queries: List[str], max_results: int = 5) -> List[Dict[str, str]]:
+    async def clean_query(self, query: str) -> str:
+        """
+        Clean and format search query by:
+        - Removing enumeration (1., 2., etc)
+        - Removing quotes
+        - Removing extra whitespace
+        
+        Args:
+            query: Raw search query
+            
+        Returns:
+            Cleaned query string
+        """
+        # Remove enumeration
+        query = re.sub(r'^\d+\.\s*', '', query)
+        # Remove quotes
+        query = query.replace('"', '').replace('"', '').replace('"', '')
+        # Clean whitespace
+        query = ' '.join(query.split())
+        return query
+
+    async def search_web(self, queries: List[str], max_results: int = 3) -> List[Dict[str, str]]:
         """
         Search the web for relevant information using DuckDuckGo.
         
@@ -81,54 +113,139 @@ class ScientificResearchAssistant:
             List of dictionaries containing search results
         """
         results = []
-        ddgs = DDGS()
+
+        seen_hrefs = set() # links already included
         
-        for query in queries:
+        for raw_query in queries:
             try:
-                # DuckDuckGo search is synchronous, we'll run it in the executor
-                search_results = await asyncio.get_event_loop().run_in_executor(
+                # Clean the query
+                query = await self.clean_query(raw_query)
+                self.logger.info(f"Searching with cleaned query: {query}")
+                
+                # Create a new DDGS instance for each query
+                ddgs = DDGS()
+                
+                # Run the synchronous search in the default thread pool
+                loop = asyncio.get_running_loop()
+                search_results = await loop.run_in_executor(
                     None,
                     lambda: list(ddgs.text(query, max_results=max_results))
                 )
-                results.extend(search_results)
+                
+                self.logger.info(f"Found {len(search_results)} results for query: {query}")
+                
+                if search_results:
+                    print(search_results)
+                    results.extend(result for result in search_results 
+                                    if result.get('href') 
+                                    and not seen_hrefs.add(result['href']))
+                else:
+                    # If no results, try a more general version of the query
+                    simplified_query = ' '.join(query.split()[:4])  # Take first 4 words
+                    self.logger.info(f"Retrying with simplified query: {simplified_query}")
+                    
+                    search_results = await loop.run_in_executor(
+                        None,
+                        lambda: list(ddgs.text(simplified_query, max_results=max_results))
+                    )
+                    if search_results:
+                        results.extend(result for result in search_results 
+                                        if result.get('href') 
+                                        and not seen_hrefs.add(result['href']))
+                
+                # Add a small delay between queries to avoid rate limiting
+                await asyncio.sleep(1)
+                
             except Exception as e:
-                self.logger.error(f"Error searching for {query}: {str(e)}")
+                self.logger.error(f"Error searching for query '{raw_query}': {str(e)}")
         
         return results
 
     async def fetch_and_parse_content(self, url: str) -> str:
         """
-        Fetch and parse content from a URL.
+        Fetch and parse content from a URL, handling both HTML and PDF files.
         
         Args:
             url: URL to fetch content from
             
         Returns:
-            Parsed text content from the webpage
+            Parsed text content from the webpage or PDF
         """
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(url, timeout=10) as response:
                     if response.status == 200:
-                        html = await response.text()
-                        soup = BeautifulSoup(html, 'html.parser')
+                        # Check if it's a PDF by examining content type
+                        content_type = response.headers.get('Content-Type', '').lower()
                         
-                        # Remove script and style elements
-                        for script in soup(["script", "style"]):
-                            script.decompose()
-                        
-                        # Get text content
-                        text = soup.get_text()
-                        
-                        # Clean up whitespace
-                        lines = (line.strip() for line in text.splitlines())
-                        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-                        text = ' '.join(chunk for chunk in chunks if chunk)
-                        
-                        return text
+                        if 'application/pdf' in content_type or url.lower().endswith('.pdf'):
+                            # Handle PDF content
+                            pdf_content = await response.read()
+                            
+                            # Run PDF parsing in a thread pool to avoid blocking
+                            loop = asyncio.get_running_loop()
+                            text = await loop.run_in_executor(
+                                None,
+                                self.parse_pdf_content,
+                                pdf_content
+                            )
+                            return text
+                        else:
+                            # Handle HTML content
+                            html = await response.text()
+                            soup = BeautifulSoup(html, 'html.parser')
+                            
+                            # Remove script and style elements
+                            for element in soup(['script', 'style', 'nav', 'footer', 'header']):
+                                element.decompose()
+                            
+                            # Get text content
+                            text = soup.get_text()
+                            
+                            # Clean up whitespace
+                            lines = (line.strip() for line in text.splitlines())
+                            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+                            text = ' '.join(chunk for chunk in chunks if chunk)
+                            
+                            return text
+                    else:
+                        self.logger.error(f"Failed to fetch {url}: Status {response.status}")
+                        return ""
             except Exception as e:
                 self.logger.error(f"Error fetching {url}: {str(e)}")
                 return ""
+    
+    def parse_pdf_content(self, pdf_content: bytes) -> str:
+        """
+        Parse PDF content using PyPDF2.
+        
+        Args:
+            pdf_content: Raw PDF content in bytes
+            
+        Returns:
+            Extracted text from the PDF
+        """
+        try:
+            import io
+            from PyPDF2 import PdfReader
+            
+            # Create a PDF reader object
+            pdf_file = io.BytesIO(pdf_content)
+            pdf_reader = PdfReader(pdf_file)
+            
+            # Extract text from all pages
+            text_content = []
+            for page in pdf_reader.pages:
+                text_content.append(page.extract_text())
+            
+            # Combine text and clean up whitespace
+            text = ' '.join(text_content)
+            text = ' '.join(text.split())
+            
+            return text
+        except Exception as e:
+            self.logger.error(f"Error parsing PDF: {str(e)}")
+            return ""
 
     def chunk_text(self, text: str, max_tokens: int = 4000) -> List[str]:
         """
@@ -187,7 +304,7 @@ class ScientificResearchAssistant:
             3. Potential challenges and solutions
             """
             
-            async with openai.AsyncOpenAI() as client:
+            async with openai.AsyncOpenAI(api_key = self.openai_api_key) as client:
                 response = await client.chat.completions.create(
                     model="gpt-4",
                     messages=[
@@ -203,55 +320,85 @@ class ScientificResearchAssistant:
 
     async def generate_final_summary(self, 
                                    question: str, 
-                                   analyses: List[str]) -> Dict[str, str]:
+                                   sources: List[str]) -> Dict[str, str]:
         """
         Generate final summary and implementation guidance.
         
         Args:
             question: Original scientific programming question
-            analyses: List of content analyses
+            sources: List of contents relevant to the programming question
             
         Returns:
             Dictionary containing domain summary and implementation guidance
         """
-        combined_analyses = "\n\n".join(analyses)
+        combined_sources = "\n\n".join([s for s in sources if len(s) < 10000])
+        print(len(combined_sources))
+        max_tokens_allowed = 7000
+
+
+        ############ Summarize Chunks ##################################
+        chunks = self.chunk_text(combined_sources, max_tokens=max_tokens_allowed)
+        num_tokens_per_summary = max_tokens_allowed // len(chunks)
+        summaries = []
         
-        prompt = f"""
-        Based on the following analyses of a scientific programming question,
-        provide two separate sections:
+        for chunk in chunks:
+            prompt = f"""
+            You will receive two pieces of information. 'Question:' which has the original question
+            that we are tasked with and 'Sources:' which contains a bunch of information potentially
+            relevant to answering the original question. Your job is to return a detailed and technical
+            summary of the Sources. As best as possible, only remove content from Sources, do not paraphrase
+            unless it is necessary. Remove information you find redundant or irrelevant to the task. In cases with conflicting information,
+            include both sets of information, but note that they are conflicting. Ensure that your answer contains
+            information regarding guidances on how to implement the code. Limit your summary to at most {num_tokens_per_summary}
+            tokens. 
+            
+            Question: {question}
+            
+            Sources: {chunk}
+            """
+        
+            async with openai.AsyncOpenAI(api_key = self.openai_api_key) as client:
+                response = await client.chat.completions.create(
+                    model="gpt-4",
+                    messages=[
+                        {"role": "system", "content": "You are a scientific research assistant."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3
+                )
+            
+            summary = response.choices[0].message.content.strip()
+            summaries.append(summary)
+
+        ##################### Blend Chunks Summaries into One Big Summary ###############################
+        final_summaries = "\n\n".join(summaries)
+        final_prompt = f"""
+        You will receive two pieces of information. 'Question:' which has the original question
+        that we are tasked with and 'Sources:' which contains a bunch of information potentially
+        relevant to answering the original question. Your job is to return a detailed and technical
+        summary of the Sources. As best as possible, only remove content from Sources, do not paraphrase
+        unless it is necessary. Remove information you find redundant and in cases with conflicting information,
+        include all of the sets of information, but note they are conflicting. Ensure that your answer contains
+        information regarding guidances on how to implement the code. Limit your response to {max_tokens_allowed//4}  tokens.
         
         Question: {question}
         
-        Analyses:
-        {combined_analyses}
-        
-        1. Domain Summary: Theoretical background and key concepts
-        2. Implementation Guidance: Practical steps, best practices, and code considerations
-        
-        Be specific and technical, but concise.
+        Sources: {final_summaries}
         """
+        async with openai.AsyncOpenAI(api_key = self.openai_api_key) as client:
+                final_response = await client.chat.completions.create(
+                    model="gpt-4",
+                    messages=[
+                        {"role": "system", "content": "You are a scientific research assistant."},
+                        {"role": "user", "content": final_prompt}
+                    ],
+                    temperature=0.3
+                )
+            
+        final_summary = final_response.choices[0].message.content.strip()
+
         
-        async with openai.AsyncOpenAI() as client:
-            response = await client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": "You are a scientific research assistant."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3
-            )
-        
-        summary = response.choices[0].message.content.strip()
-        
-        # Split into sections
-        sections = summary.split('\n\n')
-        domain_summary = sections[0].replace("Domain Summary:", "").strip()
-        implementation_guidance = sections[1].replace("Implementation Guidance:", "").strip()
-        
-        return {
-            "domain_summary": domain_summary,
-            "implementation_guidance": implementation_guidance
-        }
+        return final_summary
 
     async def research_question(self, question: str) -> ResearchResult:
         """
@@ -273,27 +420,37 @@ class ScientificResearchAssistant:
         
         # Fetch and analyze content
         analyses = []
+        contents = []
+        print(f"Iterating through {len(search_results)} search results...")
         for result in search_results:
-            content = await self.fetch_and_parse_content(result['link'])
+            content = await self.fetch_and_parse_content(result['href'])
+            #content = result['body']
+            print(f"First 50/{len(content)} characters of content: {content[:50]}")
             if content:
-                analysis = await self.analyze_content(content, question)
-                analyses.append(analysis)
+                contents.append(content)
+                #analysis = await self.analyze_content(content, question)
+                #analyses.append(analysis)
         
         # Generate final summary
-        summary = await self.generate_final_summary(question, analyses)
+        summary = await self.generate_final_summary(question, contents)
         
         return ResearchResult(
             query=question,
             search_queries=search_queries,
             relevant_sources=search_results,
-            domain_summary=summary['domain_summary'],
-            implementation_guidance=summary['implementation_guidance']
+            summary=summary
         )
+    
+def get_config():
+    if not keys_cfg_path.exists():
+        raise FileNotFoundError(f"Config file not found: {keys_cfg_path}")
+    return config.Config(str(keys_cfg_path))
 
 # Example usage
 async def main():
     # Initialize with your OpenAI API key
-    assistant = ScientificResearchAssistant(os.getenv("OPENAI_API_KEY"))
+    key: str = get_config()["OPENAI_KEY"]
+    assistant = ScientificResearchAssistant(key)
     
     # Example question
     question = "How do I implement adaptive mesh refinement for solving PDEs?"
@@ -306,10 +463,9 @@ async def main():
     print("Search Queries Used:")
     for query in result.search_queries:
         print(f"- {query}")
-    print("\nDomain Summary:")
-    print(result.domain_summary)
-    print("\nImplementation Guidance:")
-    print(result.implementation_guidance)
+    print("\nSummary:")
+    print(result.summary)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
